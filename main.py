@@ -20,17 +20,32 @@ class Worker(QThread):
         self.text = text
         self.commands = commands
         self.check = check
+        self.ssh_client = None
 
     def run(self):
+        self.ssh_client = self.connect_ssh()
+        if not self.ssh_client:
+            self.update_signal.emit("SSH connection failed.")
+            return
         self.connect_to_switches()
+
+    def connect_ssh(self):
+        try:
+            ssh_client = paramiko.SSHClient()
+            ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            ssh_client.connect(self.ssh_host, port=self.ssh_port, username=self.ssh_username, password=self.ssh_password)
+            print("SSH connected")
+            return ssh_client
+        except Exception as e:
+            print(f'Error connecting via SSH: {e}')
+            return None
 
     def connect_to_switches(self):
         pattern = r'sw-\S+'
         matches = re.findall(pattern, self.text)   #відфільтровані комутатори
 
         for i in matches:
-            client = SSHAndTelnetClient(self.ssh_host, self.ssh_port, self.ssh_username, self.ssh_password, i + ".te.clb", self.telnet_username, self.telnet_password)
-            client.connect_ssh()
+            client = SSHAndTelnetClient(self.ssh_client, i + ".te.clb", self.telnet_username, self.telnet_password)
             client.connect_telnet()
             res = ""
 
@@ -39,7 +54,6 @@ class Worker(QThread):
             for command in self.commands:
                 if command == self.commands[len(self.commands) - 1]:
                     res += client.send_telnet_command(command)
-                
                 else:
                     res += client.send_telnet_command(command)
 
@@ -54,50 +68,41 @@ class Worker(QThread):
                 self.update_signal.emit(res2)
         self.update_signal.emit("Done!!!")
 
-class SSHAndTelnetClient:  
-    def __init__(self, ssh_host, ssh_port, ssh_username, ssh_password, telnet_host, telnet_username, telnet_password):
-        self.ssh_host = ssh_host
-        self.ssh_port = ssh_port
-        self.ssh_username = ssh_username
-        self.ssh_password = ssh_password
+class SSHAndTelnetClient:
+    def __init__(self, ssh_client, telnet_host, telnet_username, telnet_password):
+        self.ssh_client = ssh_client
         self.telnet_host = telnet_host
         self.telnet_username = telnet_username
         self.telnet_password = telnet_password
+        self.telnet_channel = None
 
-    def connect_ssh(self):  
-        try:
-            self.ssh_client = paramiko.SSHClient()
-            self.ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            self.ssh_client.connect(self.ssh_host, port=self.ssh_port, username=self.ssh_username, password=self.ssh_password)
-        except Exception as e:
-            print(f'Error connecting via SSH: {e}')
-            exit(1)
-
-    def connect_telnet(self):  
+    def connect_telnet(self):
         try:
             self.telnet_channel = self.ssh_client.invoke_shell()
             self.telnet_channel.send("telnet " + self.telnet_host + "\n")
-            time.sleep(1) 
+            time.sleep(1)
             self.telnet_channel.send(self.telnet_username + "\n")
             self.telnet_channel.send(self.telnet_password + "\n")
             response = self.telnet_channel.recv(4096).decode('utf-8')
         except Exception as e:
             print(f'Error connecting via Telnet: {e}')
             self.ssh_client.close()
-            exit(1)
+            return
 
-    def send_telnet_command(self, command):  
+    def send_telnet_command(self, command):
         try:
             self.telnet_channel.send(command + "\n")
-            time.sleep(1)  
+            time.sleep(1)
             response = self.telnet_channel.recv(4096).decode('utf-8')
         except Exception as e:
             print(f'Error sending Telnet command: {e}')
         return response
 
     def close_connections(self):
-        self.telnet_channel.close()
-        self.ssh_client.close()
+        if self.telnet_channel:
+            self.telnet_channel.close()
+        if self.ssh_client:
+            self.ssh_client.close()
         print('Connections closed.')
 
 class MyWindow(QtWidgets.QMainWindow):
@@ -107,7 +112,7 @@ class MyWindow(QtWidgets.QMainWindow):
         self.setFixedSize(1070, 666)
         self.pushButton.clicked.connect(self.run_command)
         self.worker = None
-    
+
     def add_log(self, message):
         self.textEdit_3.append(message)
         cursor = QTextCursor(self.textEdit_3.document())
